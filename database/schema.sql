@@ -15,8 +15,12 @@ CREATE TABLE IF NOT EXISTS cards (
   effect_text TEXT,
   evolution_stage TEXT,
   pokemon_number TEXT,
-  weakness TEXT,
-  resistance TEXT,
+  weakness TEXT,                            -- 弱点表示用（例: "雷×2"）。弱点なしは "--"
+  weakness_type TEXT,                      -- 弱点タイプ（energy_type と同様: lightning/fighting/...）
+  weakness_value TEXT,                     -- 弱点倍率（例: "×2"）
+  resistance TEXT,                         -- 抵抗力表示用（例: "闘－30"）。なしは "--"
+  resistance_type TEXT,                    -- 抵抗力タイプ（energy_type と同様）
+  resistance_value TEXT,                   -- 抵抗力数値（例: "-30"）
   retreat_cost INTEGER,
   set_code TEXT,
   set_name TEXT,

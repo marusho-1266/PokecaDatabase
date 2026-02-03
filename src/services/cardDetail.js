@@ -194,23 +194,36 @@ async function extractBasicInfo(page) {
     }
     
     // タイプの抽出（ポケモンの場合）
+    const typeMap = {
+      'grass': '草',
+      'fire': '炎',
+      'water': '水',
+      'lightning': '雷',
+      'psychic': '超',
+      'fighting': '闘',
+      'dark': '悪',
+      'metal': '鋼',
+      'colorless': '無色'
+    };
     const typeIcon = document.querySelector('.type-icon, .pokemon-type');
     if (typeIcon) {
       const className = typeIcon.className || '';
       const typeMatch = className.match(/icon-([a-z]+)/);
       if (typeMatch) {
-        const typeMap = {
-          'grass': '草',
-          'fire': '炎',
-          'water': '水',
-          'lightning': '雷',
-          'psychic': '超',
-          'fighting': '闘',
-          'dark': '悪',
-          'metal': '鋼',
-          'colorless': '無色'
-        };
         result.type = typeMap[typeMatch[1]] || typeMatch[1];
+      }
+    }
+    // フォールバック: テーブル・h4 外の span.icon（カードタイプは弱点テーブルより上に表示される想定）
+    if (!result.type && result.category === 'ポケモン') {
+      const allIcons = document.querySelectorAll('span[class*="icon-"]');
+      for (const el of allIcons) {
+        if (el.closest('h4')) continue; // ワザ名内のエネルギーは除外
+        if (el.closest('table')) continue; // 弱点・抵抗力テーブル内は除外
+        const typeMatch = (el.className || '').match(/icon-([a-z]+)/);
+        if (typeMatch) {
+          result.type = typeMap[typeMatch[1]] || typeMatch[1];
+          break;
+        }
       }
     }
 
@@ -248,41 +261,98 @@ async function extractBasicInfo(page) {
 }
 
 /**
- * 弱点・抵抗力・にげるコストを抽出
+ * 弱点・抵抗力・にげるコストを抽出（弱点・抵抗力はタイプ＋数値で分離）
+ * セル内: span.icon.icon-{type} でタイプ、残りテキストで倍率/数値（×2, －30 等）
  * @param {puppeteer.Page} page - Puppeteerページ
  * @returns {Promise<Object>}
  */
 async function extractWeaknessResistance(page) {
   return await page.evaluate(() => {
+    function parseCell(cell) {
+      const display = (cell.textContent || '').trim();
+      const typeIcon = cell.querySelector('span.icon');
+      let type = null;
+      if (typeIcon) {
+        const typeMatch = (typeIcon.className || '').match(/icon-([a-z]+)/);
+        if (typeMatch) type = typeMatch[1];
+      }
+      const value = typeIcon
+        ? display.replace((typeIcon.textContent || '').trim(), '').trim() || display
+        : display;
+      return { type, value, display };
+    }
+
     const result = {
       weakness: '',
+      weaknessType: null,
+      weaknessValue: '',
       resistance: '',
+      resistanceType: null,
+      resistanceValue: '',
       retreatCost: null
     };
-    
+
     const tables = Array.from(document.querySelectorAll('table'));
     const target = tables.find((table) => {
-      const header = table.querySelector('tr');
-      if (!header) return false;
-      const headText = header.textContent || '';
-      return headText.includes('弱点') && headText.includes('抵抗力') && headText.includes('にげる');
+      const text = (table.textContent || '').replace(/\s+/g, '');
+      return text.includes('弱点') && text.includes('にげる');
     });
     if (!target) return result;
 
-    const rows = target.querySelectorAll('tr');
-    if (rows.length > 1) {
-      const cells = rows[1].querySelectorAll('td');
-      if (cells.length >= 3) {
-        result.weakness = cells[0].textContent.trim();
-        result.resistance = cells[1].textContent.trim();
-        const retreatText = cells[2].textContent.trim();
-        const retreatMatch = retreatText.match(/(\d+)/);
-        if (retreatMatch) {
-          result.retreatCost = parseInt(retreatMatch[1]);
+    const rows = Array.from(target.querySelectorAll('tr'));
+    let dataRow = null;
+    let headerRow = null;
+    let retreatColIndex = 2;
+
+    for (let i = 0; i < rows.length; i++) {
+      const rowText = (rows[i].textContent || '').replace(/\s+/g, '');
+      if (rowText.includes('弱点') && rowText.includes('にげる')) {
+        headerRow = rows[i];
+        const cells = rows[i].querySelectorAll('th, td');
+        for (let c = 0; c < cells.length; c++) {
+          if ((cells[c].textContent || '').includes('にげる')) {
+            retreatColIndex = c;
+            break;
+          }
+        }
+        if (i + 1 < rows.length) {
+          dataRow = rows[i + 1];
+        }
+        break;
+      }
+    }
+
+    if (!dataRow && rows.length >= 2) {
+      dataRow = rows[1];
+    }
+    if (!dataRow) return result;
+
+    const cells = dataRow.querySelectorAll('td');
+    if (cells.length >= 3) {
+      const weak = parseCell(cells[0]);
+      result.weakness = weak.display;
+      result.weaknessType = weak.type;
+      result.weaknessValue = weak.value || '';
+
+      const res = parseCell(cells[1]);
+      result.resistance = res.display;
+      result.resistanceType = res.type;
+      result.resistanceValue = res.value || '';
+
+      const retreatCell = cells[retreatColIndex] || cells[2];
+      const retreatText = (retreatCell.textContent || '').trim();
+      const retreatMatch = retreatText.match(/(\d+)/);
+      if (retreatMatch) {
+        result.retreatCost = parseInt(retreatMatch[1]);
+      } else {
+        // 数値がない場合: にげるはエネルギーアイコンの個数（無色のみ・タイプ管理不要）
+        const energyIcons = retreatCell.querySelectorAll('span.icon, span[class*="icon-"], img[src*="energy"]');
+        if (energyIcons.length > 0) {
+          result.retreatCost = energyIcons.length;
         }
       }
     }
-    
+
     return result;
   });
 }
@@ -491,7 +561,11 @@ export async function getCardDetail(cardId, regulation = 'SV') {
     const energyType = isEnergy
       ? detectEnergyTypeFromText(`${cardName}\n${effectInfo.effectText || ''}`)
       : null;
-    const cardType = energyType || basicInfo.type;
+    const wazaTypeMap = { grass: '草', fire: '炎', water: '水', lightning: '雷', psychic: '超', fighting: '闘', dark: '悪', metal: '鋼', colorless: '無色' };
+    const typeFromWaza = (wazaInfo && wazaInfo.length > 0 && wazaInfo[0].energyCost && wazaInfo[0].energyCost[0])
+      ? (wazaTypeMap[wazaInfo[0].energyCost[0]] || wazaInfo[0].energyCost[0])
+      : null;
+    const cardType = energyType || basicInfo.type || typeFromWaza;
     
     // カード詳細情報を構築
     const cardDetail = {
@@ -506,7 +580,11 @@ export async function getCardDetail(cardId, regulation = 'SV') {
       evolutionStage: basicInfo.evolutionStage,
       pokemonNumber: profileInfo.pokemonNumber,
       weakness: weaknessResistance.weakness,
+      weaknessType: weaknessResistance.weaknessType || null,
+      weaknessValue: weaknessResistance.weaknessValue || '',
       resistance: weaknessResistance.resistance,
+      resistanceType: weaknessResistance.resistanceType || null,
+      resistanceValue: weaknessResistance.resistanceValue || '',
       retreatCost: weaknessResistance.retreatCost,
       setName: setInfo.setName,
       setCode: setInfo.setCode,
