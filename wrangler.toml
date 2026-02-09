@@ -1,0 +1,8 @@
+name = "pokeca-db"
+# D1 のみ利用するため、Worker の main は未使用でもよい。execute には d1_databases だけ必要。
+main = "src/server.js"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "pokeca"
+database_id = "9931e768-092b-4b79-b1c0-b98ab47f852f"

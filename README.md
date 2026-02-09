@@ -177,13 +177,54 @@ node scripts/collect-details.js --limit=100
 2. **追加収集**
    - 新レギュレーションや新セット用に再度 `db:collect-ids` を実行したあと、同じく `db:collect-details` で未取得分を取得
 
-## 8. 補足
+## 8. Cloudflare D1 を利用する場合
+
+PostgreSQL の代わりに **Cloudflare D1**（SQLite）を DB として使うことができます。収集スクリプト・init/verify は環境変数 `USE_D1=1` で D1 向けに切り替わります。
+
+### 前提
+
+- **wrangler** をインストール済み（`npm install -D wrangler`）
+- **wrangler.toml** に D1 の `[[d1_databases]]` を記載済み（`database_name` と `database_id`）
+- 初回のみ `npx wrangler login` で Cloudflare にログイン済み
+- D1 データベースを CLI またはダッシュボードで作成済み
+
+### 手順
+
+1. **スキーマ投入（初回）**
+   ```bash
+   USE_D1=1 node scripts/init-db.js
+   ```
+   または手動で:
+   ```bash
+   npx wrangler d1 execute pokeca --remote --file=./database/schema-d1.sql
+   ```
+
+2. **接続確認**
+   ```bash
+   USE_D1=1 node scripts/verify-db.js
+   ```
+
+3. **カードID収集**
+   ```bash
+   USE_D1=1 node scripts/collect-card-ids.js --pages=1
+   ```
+
+4. **詳細収集**
+   ```bash
+   USE_D1=1 node scripts/collect-details.js --limit=10
+   ```
+
+環境変数 `D1_DATABASE_NAME` で DB 名を指定できます（既定値は `pokeca`）。wrangler.toml の `database_name` と一致させてください。詳細な実装計画は [docs/D1_wrangler_execute_実装計画.md](docs/D1_wrangler_execute_実装計画.md) を参照してください。
+
+---
+
+## 9. 補足
 
 - **レート制限**: 詳細収集は 1 リクエストあたり約 1.2 秒待機します。大量収集時は `--limit` で区切って実行することを推奨します。
 - **エラー**: 404 やネットワークエラーは `collection_logs` に `status='error'` で記録されます。必要に応じて該当 `card_id` を確認してください。
-- **スキーマ**: テーブル定義は `server/database/schema.sql` です。PostgreSQL 用に `docs/データベース構築計画.md` の設計を反映しています。
+- **スキーマ**: テーブル定義は `database/schema.sql`（PostgreSQL）および `database/schema-d1.sql`（D1）です。PostgreSQL 用に `docs/データベース構築計画.md` の設計を反映しています。
 
-### 8.1 収集が 0 件になる場合（トラブルシューティング）
+### 9.1 収集が 0 件になる場合（トラブルシューティング）
 
 公式サイトがヘッドレスブラウザを検知し、カード一覧の HTML を返していない可能性があります。
 
@@ -193,7 +234,7 @@ node scripts/collect-details.js --limit=100
   ```
 - 上記で件数が取れる場合、同一環境では以降も `HEADLESS=false` 付きで実行するか、別データソース（API 等）の利用を検討してください。
 
-### 8.2 スキーマ変更時（既存DB）
+### 9.2 スキーマ変更時（既存DB）
 
 `schema.sql` にカラム追加などがあった場合、既にテーブルがある環境では `ALTER TABLE` で反映します。
 
