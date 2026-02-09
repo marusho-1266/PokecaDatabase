@@ -7,12 +7,16 @@
  *   node scripts/collect-card-ids.js --regulation=XY  … 指定レギュレーションのみ
  *   node scripts/collect-card-ids.js --all        … 全レギュレーション (XY, SM, S, SV)
  * 環境変数: PGHOST, PGUSER, PGPASSWORD, PGDATABASE または DATABASE_URL
+ * D1 利用時: USE_D1=1, D1_DATABASE_NAME=pokeca（任意）
  */
 
 import 'dotenv/config';
-import { getPool, closePool } from '../src/db.js';
+import { getPool, closePool, query } from '../src/db.js';
+import { buildCardsUpsertSql, executeRemote } from '../src/d1.js';
 import { fetchSearchResultPage } from '../src/services/scraper.js';
 import { closeBrowser } from '../src/utils/browser.js';
+
+const USE_D1 = !!process.env.USE_D1;
 
 /** 現行レギュレーション（スタンダード＝SV） */
 const CURRENT_REGULATION = 'SV';
@@ -64,15 +68,35 @@ async function insertCard(client, card, regulation) {
 
 async function main() {
   const { regulations, maxPages } = parseArgs();
-  const pool = getPool();
-  let totalInserted = 0;
+  let pool = null;
 
   console.log('検索ページからカードIDを収集してDBに保存します。');
+  if (USE_D1) {
+    console.log('DB: Cloudflare D1（wrangler d1 execute）');
+  } else {
+    pool = getPool();
+    try {
+      await query('SELECT 1');
+      let dbName = process.env.PGDATABASE || 'pokeca';
+      if (process.env.DATABASE_URL) {
+        try {
+          const p = new URL(process.env.DATABASE_URL).pathname.replace(/^\//, '');
+          if (p) dbName = p;
+        } catch (_) {}
+      }
+      console.log('DB: PostgreSQL 接続OK（データベース:', dbName, '）');
+    } catch (e) {
+      console.error('DB接続エラー:', e.message);
+      console.error('  .env の PGHOST, PGUSER, PGPASSWORD, PGDATABASE または DATABASE_URL を確認してください。');
+      process.exit(1);
+    }
+  }
   console.log('レギュレーション:', regulations[0] === CURRENT_REGULATION && regulations.length === 1 ? DEFAULT_REGULATION_LABEL : regulations.join(', '));
   if (maxPages != null) {
     console.log('取得ページ数:', maxPages);
   }
 
+  let totalInserted = 0;
   for (const regulation of regulations) {
     const regulationLabel = regulation === CURRENT_REGULATION && regulations.length === 1 ? DEFAULT_REGULATION_LABEL : regulation;
     let pageNum = 1;
@@ -93,18 +117,27 @@ async function main() {
       }
 
       if (!cards || cards.length === 0) {
+        console.warn(`[${regulationLabel}] ページ ${pageNum}: カードが1件も取得できませんでした。`);
+        console.warn('  検索ページの構造変更やネットワーク、表示待ち時間の不足が考えられます。');
+        console.warn('  デバッグ例: HEADLESS=false npm run db:collect-ids -- --pages=1');
         hasMore = false;
         break;
       }
 
-      const client = await pool.connect();
-      try {
-        for (const card of cards) {
-          await insertCard(client, card, regulation);
-          totalInserted++;
+      if (USE_D1) {
+        const sql = buildCardsUpsertSql(cards, regulation);
+        if (sql) executeRemote(sql);
+        totalInserted += cards.length;
+      } else {
+        const client = await pool.connect();
+        try {
+          for (const card of cards) {
+            await insertCard(client, card, regulation);
+            totalInserted++;
+          }
+        } finally {
+          client.release();
         }
-      } finally {
-        client.release();
       }
 
       console.log(`  -> ${cards.length} 件処理（累計 ${totalInserted} 件）`);
@@ -120,7 +153,9 @@ async function main() {
   }
 
   await closeBrowser();
-  await closePool();
+  if (!USE_D1) {
+    await closePool();
+  }
   console.log('完了。総処理件数:', totalInserted);
 }
 

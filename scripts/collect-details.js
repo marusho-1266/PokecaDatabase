@@ -2,13 +2,16 @@
  * cards テーブルにいるが詳細未取得のカードについて、詳細ページから取得して更新する
  * 使用例: node scripts/collect-details.js [--limit=50]
  * 環境変数: PGHOST, PGUSER, PGPASSWORD, PGDATABASE または DATABASE_URL
+ * D1 利用時: USE_D1=1, D1_DATABASE_NAME=pokeca（任意）
  */
 
 import 'dotenv/config';
-import { query, getPool, withTransaction, closePool } from '../src/db.js';
+import { query, withTransaction, closePool } from '../src/db.js';
+import { queryRemote, buildDetailUpsertSql, buildCollectionLogSql, executeRemote } from '../src/d1.js';
 import { getCardDetail } from '../src/services/cardDetail.js';
 import { closeBrowser } from '../src/utils/browser.js';
 
+const USE_D1 = !!process.env.USE_D1;
 const REQUEST_DELAY_MS = 1200;
 const DEFAULT_LIMIT = 50;
 
@@ -19,6 +22,12 @@ function parseArgs() {
 }
 
 async function getCardsWithoutDetails(limit) {
+  if (USE_D1) {
+    const safeLimit = Math.max(1, Math.min(Number(limit), 500));
+    const sql = `SELECT card_id, COALESCE(regulation, 'SV') AS regulation FROM cards WHERE hp IS NULL ORDER BY card_id LIMIT ${safeLimit}`;
+    const rows = queryRemote(sql);
+    return rows.map((r) => ({ card_id: r.card_id ?? r.cardId, regulation: r.regulation }));
+  }
   const res = await query(
     `SELECT card_id, COALESCE(regulation, 'SV') AS regulation FROM cards WHERE hp IS NULL ORDER BY card_id LIMIT $1`,
     [limit]
@@ -140,11 +149,16 @@ async function updateCardAndWaza(client, detail, regulation) {
 async function main() {
   const { limit } = parseArgs();
   console.log(`詳細未取得カードを最大 ${limit} 件取得します。`);
+  if (USE_D1) {
+    console.log('DB: Cloudflare D1（wrangler d1 execute）');
+  }
 
   const rows = await getCardsWithoutDetails(limit);
   if (rows.length === 0) {
     console.log('対象カードはありません。');
-    await closePool();
+    if (!USE_D1) {
+      await closePool();
+    }
     return;
   }
 
@@ -159,14 +173,26 @@ async function main() {
 
     try {
       const detail = await getCardDetail(cardId, regulationToUse);
-      await withTransaction(async (client) => {
-        await updateCardAndWaza(client, detail, regulationToUse);
-      });
-      await logResult(cardId, 'success', 'card_detail_page', null, Date.now() - start);
+      if (USE_D1) {
+        const logEntry = { cardId, status: 'success', source: 'card_detail_page', errorMessage: null, processingTimeMs: Date.now() - start };
+        const sql = buildDetailUpsertSql(detail, regulationToUse, logEntry);
+        executeRemote(sql);
+      } else {
+        await withTransaction(async (client) => {
+          await updateCardAndWaza(client, detail, regulationToUse);
+        });
+        await logResult(cardId, 'success', 'card_detail_page', null, Date.now() - start);
+      }
       ok++;
       console.log(`  OK ${cardId} (${detail.name})`);
     } catch (err) {
-      await logResult(cardId, 'error', 'card_detail_page', err.message, Date.now() - start);
+      const processingTimeMs = Date.now() - start;
+      if (USE_D1) {
+        const logEntry = { cardId, status: 'error', source: 'card_detail_page', errorMessage: err.message, processingTimeMs };
+        executeRemote(buildCollectionLogSql(logEntry));
+      } else {
+        await logResult(cardId, 'error', 'card_detail_page', err.message, processingTimeMs);
+      }
       ng++;
       console.log(`  NG ${cardId}: ${err.message}`);
     }
@@ -175,7 +201,9 @@ async function main() {
   }
 
   await closeBrowser();
-  await closePool();
+  if (!USE_D1) {
+    await closePool();
+  }
   console.log(`完了: 成功 ${ok}, 失敗 ${ng}`);
 }
 
